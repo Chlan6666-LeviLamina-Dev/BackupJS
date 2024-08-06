@@ -1,3 +1,7 @@
 config.json
 Recovery_Backup_Core.exe
 Recovery_Backup_Core.pdb
+/Recovery_Backup_Core/.idea
+/Recovery_Backup_Core/target
+/Recovery_Backup_Core/Cargo.lock
+/Recovery_Backup_Core/.gitignore

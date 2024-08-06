@@ -1,0 +1,12 @@
+[package]
+name = "Recovery_Backup_Core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zip= "2.1.6"
+rayon = "1.10.0"
+reqwest = { version = "0.12.5", features = ["stream"] }
+tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros"] }
+futures = "0.3.30"
+tokio-util = "0.7.11"
