@@ -1,0 +1,12 @@
+{
+    "entry": "BackupJS.js",
+	"author": "Chlna6666",
+    "name": "BackupJS",
+    "type": "lse-nodejs",
+    "dependencies": [
+        {
+            "name": "legacy-script-engine-nodejs"
+        }
+    ],
+     "version": "0.0.2"
+}
