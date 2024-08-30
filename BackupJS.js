@@ -2,10 +2,53 @@ const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+
+class DynamicEnum {
+    constructor(command, enumName, initialValues = []) {
+        this.command = command;
+        this.enumName = enumName;
+        this.values = new Set(initialValues);
+        
+        // 初始化 SoftEnum
+        this.command.setSoftEnum(this.enumName, Array.from(this.values));
+    }
+
+    addValue(value) {
+        if (!this.values.has(value)) {
+            this.values.add(value);
+            this.command.addSoftEnumValues(this.enumName, [value]);
+        }
+    }
+
+    addValues(values) {
+        values.forEach(value => this.addValue(value));
+    }
+
+    removeValue(value) {
+        if (this.values.has(value)) {
+            this.values.delete(value);
+            this.command.removeSoftEnumValues(this.enumName, [value]);
+        }
+    }
+
+    listValues() {
+        return Array.from(this.values);
+    }
+
+    contains(value) {
+        return this.values.has(value);
+    }
+
+    getEnumName() {
+        return this.enumName;
+    }
+}
+
+
 ll.registerPlugin(
     "BackupJS",
     "A plugin to manage backups",
-    [0, 0, 1],
+    [0, 0, 3],
     {}
 );
 
@@ -18,11 +61,16 @@ var defaultConfig = {
     Language: "zh_CN",
     MaxStorageTime: 7,
     BackupPath: "./backup",
+    PermanentBackupPath: "./backup/permanent_backup",
+    queryRetries: 10,     // 尝试次数
+    retryDelay: 100,      // 每次重试之间的延迟（毫秒）根据加载区块计算
+    initialDelay: 50,      // 在第一次查询前的延迟（毫秒）根据加载区块计算
+    format: "zip",
     Compress: 0,
     MaxWaitForZip: 1800,
     "7za": "./plugins/BackupJS",
     RecoveryBackupCore: "./plugins/BackupJS",
-    serverExe:"bedrock_server_mod.exe",
+    serverExe: "bedrock_server_mod.exe",
     upload: {
         remotePath: '/backup',
         webdavUrl: 'https://xxx.com/webdav',
@@ -32,42 +80,63 @@ var defaultConfig = {
     allowlist: ["114514"]
 };
 
-
 function readConfig() {
+    let currentConfig = {};
+
     // 检查配置文件是否存在
-    if (!fs.existsSync(configPath)) {
-        // 如果配置文件不存在，生成默认配置文件
+    if (fs.existsSync(configPath)) {
+        // 读取现有配置文件
         try {
-            fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 4), 'utf8');
-            sendMessage(null, `Default config file created at ${configPath}`, 'info');
+            const data = fs.readFileSync(configPath, 'utf8');
+            currentConfig = JSON.parse(data);
         } catch (error) {
-            sendMessage(null, `Failed to create default config file: ${error}`, 'error');
-            return defaultConfig;
+            sendMessage(null, `Failed to read or parse config: ${error}`, 'error');
+            currentConfig = {};
+        }
+    } else {
+        sendMessage(null, `Config file not found, creating default config at ${configPath}`, 'info');
+    }
+
+    // 合并默认配置与现有配置
+    const mergedConfig = { ...defaultConfig, ...currentConfig };
+
+    // 检查是否有新的配置项需要写回文件
+    const isConfigUpdated = JSON.stringify(mergedConfig) !== JSON.stringify(currentConfig);
+    if (isConfigUpdated) {
+        try {
+            fs.writeFileSync(configPath, JSON.stringify(mergedConfig, null, 4), 'utf8');
+            sendMessage(null, `Config file updated with missing keys at ${configPath}`, 'info');
+        } catch (error) {
+            sendMessage(null, `Failed to update config file: ${error}`, 'error');
         }
     }
 
-    // 读取配置文件
-    try {
-        const data = fs.readFileSync(configPath, 'utf8');
-        return { ...defaultConfig, ...JSON.parse(data) };
-    } catch (error) {
-        sendMessage(null, `Failed to read or parse config: ${error}`, 'error');
-        return defaultConfig;
-    }
+    return mergedConfig;
 }
 
 const config = readConfig();
+
  
-function clearBackupTmpPath() {
-    if (File.exists(backup_tmp)) {
-        File.delete(backup_tmp);
+function initializeBackupPaths() {
+    // 确保临时备份路径存在并清理旧的临时文件
+    if (fs.existsSync(backup_tmp)) {
+        fs.rmSync(backup_tmp, { recursive: true, force: true });
     }
-    File.mkdir(backup_tmp);
+    fs.mkdirSync(backup_tmp, { recursive: true });
+
+    // 确保普通备份路径和永久备份路径存在
+    const backupDirs = [config.BackupPath, config.PermanentBackupPath];
+    backupDirs.forEach(dir => {
+        const fullPath = path.resolve(dir);
+        if (!fs.existsSync(fullPath)) {
+            fs.mkdirSync(fullPath, { recursive: true });
+        }
+    });
 }
 
 // 初始化
 function init() {
-    clearBackupTmpPath();
+    initializeBackupPaths();
 }
 
 function sendMessage(player, message, type) {
@@ -83,10 +152,18 @@ function sendMessage(player, message, type) {
     }
 }
 
-function copyFolder(source, target, callback) {
-    const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe'); // Rust 程序路径
-    const command = `"${exePath}" copy "${source}" "${target}"`; // 传递操作和路径作为参数
+function kickAllPlayers(message = `服务器回档中`) {
+    mc.getOnlinePlayers().forEach(player => player.kick(message));
+}
 
+function copyFolder(source, target, deleteAfterCopy = false, callback) {
+    const exePath = path.resolve(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe'); // Rust 程序路径
+    
+    let command = `"${exePath}" copy "${source}" "${target}"`;
+
+    if (deleteAfterCopy) {
+        command += " --delete";
+    }
     exec(command, (error, stdout, stderr) => {
         if (error) {
             sendMessage(null, `exec error: ${error}`, 'error');
@@ -97,101 +174,237 @@ function copyFolder(source, target, callback) {
     });
 }
 
-function cleanupOldBackups(backupPath, maxAgeDays, callback) {
+function cleanupOldBackups(BackupPath, maxAgeDays, callback) {
     const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe'); // Rust 程序路径
-    const command = `"${exePath}" cleanup "${backupPath}" "${maxAgeDays}"`; // 传递操作和路径作为参数
+    const format = config.format;
+    // 构建执行命令
+    const command = `"${exePath}" cleanup "${BackupPath}" "${maxAgeDays}" "${format}"`;
 
+    // 执行命令
     exec(command, (error, stdout, stderr) => {
         if (error) {
-            sendMessage(null, `exec error: ${error}`, 'error');
+            sendMessage(null, `exec error: ${error.message}`, 'error');
             callback(false);
             return;
         }
         callback(true);
     });
+}
+
+
+function formatSize(bytes) {
+    if (bytes >= 1024 ** 3) {
+        return (bytes / (1024 ** 3)).toFixed(2) + ' GB';
+    } else if (bytes >= 1024 ** 2) {
+        return (bytes / (1024 ** 2)).toFixed(2) + ' MB';
+    } else if (bytes >= 1024) {
+        return (bytes / 1024).toFixed(2) + ' KB';
+    } else {
+        return bytes + ' bytes';
+    }
+}
+
+function formatDuration(ms) {
+    if (ms >= 1000 * 60) {
+        return (ms / (1000 * 60)).toFixed(2) + 'min';
+    } else if (ms >= 1000) {
+        return (ms / 1000).toFixed(2) + 's';
+    } else {
+        return ms + ' ms';
+    }
 }
 
 function compressFolder(source, target, callback) {
     const exePath = path.join(config["7za"], '7za.exe');
     const compressLevel = config.Compress;
     const maxWaitForZip = config.MaxWaitForZip;
+    const format = config.format;
 
-    // 确保只压缩 source 目录中的内容，而不是整个目录本身
-    const command = `"${exePath}" a -mx=${compressLevel} "${target}" "${source}\\*"`; // 使用通配符
+    // 检查7za.exe路径是否存在
+    if (!fs.existsSync(exePath)) {
+        sendMessage(null, `7za.exe not found at path: ${exePath}`, 'error');
+        callback(false, 0);
+        return;
+    }
 
+    // 根据格式选择相应的命令选项
+    let formatOption;
+    switch (format.toLowerCase()) {
+        case 'zip':
+            formatOption = '-tzip';
+            break;
+        case '7z':
+            formatOption = '-t7z';
+            break;
+        case 'tar':
+            formatOption = '-ttar';
+            break;
+        case 'gzip':
+            formatOption = '-tgzip';
+            break;
+        case 'bzip2':
+            formatOption = '-tbzip2';
+            break;
+        case 'xz':
+            formatOption = '-txz';
+            break;
+        default:
+            sendMessage(null, `不支持的压缩格式: ${format}`, 'error');
+            callback(false, 0);
+            return;
+    }
+
+    target = `${target}.${format}`;
+    
+    const command = `"${exePath}" a ${formatOption} -mx=${compressLevel} "${target}" "${source}\\*"`; // 使用通配符
+    //console.log(`Running command: ${command}`);
+
+
+    // 执行压缩命令
     const compressProcess = exec(command, (error, stdout, stderr) => {
         clearTimeout(timeout);
         if (error) {
-            sendMessage(player, `exec error: ${error}`, 'error');
-            callback(false);
+            sendMessage(null, `exec error: ${error.message}`, 'error');
+            callback(false, 0);
             return;
         }
-        callback(true);
+        // 获取压缩文件的大小
+        fs.stat(target, (err, stats) => {
+            if (err) {
+                sendMessage(null, `Failed to get file size: ${err.message}`, 'error');
+                callback(false, 0);
+            } else {
+                callback(true, stats.size);
+            }
+        });
     });
 
+    // 设置超时处理
     const timeout = setTimeout(() => {
         compressProcess.kill();
-        sendMessage(player, `压缩超时 (${maxWaitForZip} s)`, 'error');
-        callback(false);
+        sendMessage(null, `压缩超时 (${maxWaitForZip} s)`, 'error');
+        callback(false, 0);
     }, maxWaitForZip * 1000);
 }
 
+function getExtensionByFormat(format) {
+    switch (format) {
+        case 'zip':
+            return '.zip';
+        case '7z':
+            return '.7z';
+        case 'tar':
+            return '.tar';
+        case 'gzip':
+            return '.gz';
+        case 'bzip2':
+            return '.bz2';
+        case 'xz':
+            return '.xz';
+        default:
+            return '.zip'; // 默认使用 .zip 作为扩展名
+    }
+}
 
-function backup(player, output) {
+function backup(player, output,isPermanent = false) {
     const startTime = new Date();
-	const timestamp = system.getTimeStr().replace(/ /, '_').replace(/:/g, '-');
+    const timestamp = system.getTimeStr().replace(/ /, '_').replace(/:/g, '-');
     const worldPath = `./worlds/${worldName}`;
-    const zipFileName = path.join(config.BackupPath, `${worldName}_${timestamp}.zip`);
+    const BackupDir = isPermanent ? config.PermanentBackupPath : config.BackupPath;
+    const zipFileName = path.resolve(BackupDir, `${worldName}_${timestamp}`);
     const maxAgeDays = config.MaxStorageTime;
+	const retries = config.queryRetries;
+	const delayBetweenRetries = config.retryDelay;
+	const delayBeforeFirstQuery = config.initialDelay;
 
-    if (!File.exists(config.BackupPath)) {
-        File.mkdir(config.BackupPath);
+    if (!fs.existsSync(config.BackupPath)) {
+        fs.mkdirSync(config.BackupPath);
     }
     sendMessage(player, "开始执行备份...", 'info');
-    clearBackupTmpPath();
-     // 检查 maxAgeDays 是否为 -1，如果不是，则执行清理旧备份操作
-     if (maxAgeDays !== -1) {
-            cleanupOldBackups(config.BackupPath, maxAgeDays, (cleanupResult) => {
-              if (cleanupResult) {
-                    sendMessage(player, "旧备份清理完成", 'info');
-              } else {
-                                sendMessage(player, "清理失败", 'error');
-                            }
-                        });
-                    } else {
-                        sendMessage(player, "跳过旧备份清理", 'info');
-                    }
-    mc.runcmdEx("save hold");
-    copyFolder(worldPath, backup_tmp, (result) => {
-        mc.runcmdEx("save resume");
-        
-        if (result) {
-            sendMessage(player, "复制完成", 'info');
-            
-            compressFolder(backup_tmp, zipFileName, (compressResult) => {
-                const endTime = new Date();
-                const duration = endTime - startTime; // 计算总耗时
-                
-                if (compressResult) {
-                    sendMessage(player, `备份完成，总耗时 ${duration} ms`, 'info');
+
+    if (maxAgeDays !== -1) {
+        cleanupOldBackups(config.BackupPath, maxAgeDays, (cleanupResult) => {
+            if (cleanupResult) {
+                sendMessage(player, "旧备份清理完成", 'info');
+            } else {
+                sendMessage(player, "清理失败", 'error');
+            }
+        });
+    } else {
+        sendMessage(player, "跳过旧备份清理", 'info');
+    }
+
+    const holdResult = mc.runcmdEx("save hold");
+    if (!holdResult.success) {
+		mc.runcmdEx("save resume");
+        sendMessage(player, "保存状态保持失败，备份中止。", 'error');
+        return;
+    }
+    sendMessage(player, "世界保存状态已保持。", 'info');
+    function tryQuerySaveState(attempt) {
+        if (attempt > retries) {
+			mc.runcmdEx("save resume");
+            sendMessage(player, "多次尝试查询保存状态失败，放弃备份。", 'error');
+            return;
+        }
+
+        const queryResult = mc.runcmdEx("save query");
+
+        //onsole.log("save query result:", queryResult);
+
+        const successPattern = /Data saved\. Files are now ready to be copied\./;
+
+        if (queryResult.success && successPattern.test(queryResult.output)) {
+            sendMessage(player, "世界数据已保存，可以开始备份。", 'info');
+
+            copyFolder(worldPath, backup_tmp, false, (result) => {
+                if (result) {
+					mc.runcmdEx("save resume");
+                    sendMessage(player, "世界数据复制完成。", 'info');
+
+                    compressFolder(backup_tmp, zipFileName, (compressResult, fileSize) => {
+                        const endTime = new Date();
+                        const duration = endTime - startTime;
+
+                        if (compressResult) {
+                            const formattedSize = formatSize(fileSize);
+                            const formattedDuration = formatDuration(duration);
+                            sendMessage(player, `备份完成，总耗时 ${formattedDuration}，文件大小 ${formattedSize}`, 'info');
+                        } else {
+                            sendMessage(player, "压缩失败", 'error');
+                        }
+                    });
                 } else {
-                    sendMessage(player, "压缩失败", 'error');
+					mc.runcmdEx("save resume");
+                    sendMessage(player, "世界数据复制失败。", 'error');
                 }
             });
         } else {
-            sendMessage(player, "复制失败", 'error');
+            sendMessage(player, `查询保存状态失败或返回结果不匹配，重试第 ${attempt} 次。`, 'error');
+            setTimeout(() => tryQuerySaveState(attempt + 1), delayBetweenRetries);
         }
-    });
+    }
+
+    setTimeout(() => tryQuerySaveState(1), delayBeforeFirstQuery);
 }
 
 
-function recoverBackup(player, output, backupFilename) {
-    const backupPath = path.resolve(config.BackupPath); // 转换为绝对路径
-    const backupFilePath = path.resolve(backupPath, backupFilename); // 转换为绝对路径
+
+
+
+function recoverBackup(player, output, backupFilename,isPermanent = false) {
+    const BackupDir = isPermanent ? config.PermanentBackupPath : config.BackupPath;
+    const BackupPath = path.resolve(BackupDir); // 转换为绝对路径
+    const sanitizedBackupFilename = backupFilename.replace(/["']/g, ""); // 使用正则表达式移除引号
+    const backupFilePath = path.resolve(BackupPath, sanitizedBackupFilename); // 转换为绝对路径
     const serverExe = config.serverExe;
     const serverDir = path.resolve("."); // 服务器目录路径
+    const sevenZipPath = path.resolve(config["7za"], '7za.exe'); // 7za 的路径
+    
+    // 将路径转换为 Base64 编码 绕过中文路径
+    const base64BackupFilePath = Buffer.from(backupFilePath).toString('base64');
 
-    const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe'); // Rust 程序路径
+	const exePath = path.resolve(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe');
 
     // 检查备份文件是否存在
     if (!fs.existsSync(backupFilePath)) {
@@ -205,14 +418,14 @@ function recoverBackup(player, output, backupFilename) {
         return;
     }
 
-    // 创建批处理文件内容
-    const batchContent = `
-@echo off
-"${exePath}" recover "${backupFilePath}" "${serverDir}" "${worldName}" "${serverExe}"
-`;
+	const batchContent = `
+	@echo off
+	"${exePath}" recover "${base64BackupFilePath}" "${serverDir}" "${worldName}" "${serverExe}" "${sevenZipPath}"
+	`;
 
-    const batchFilePath = path.resolve(__dirname, 'startup_script.bat');
-    fs.writeFileSync(batchFilePath, batchContent);
+	// 使用 UTF-8 编码写入批处理文件
+	const batchFilePath = path.resolve(__dirname, 'startup_script.bat');
+	fs.writeFileSync(batchFilePath, batchContent, { encoding: 'utf8' });
 
     // 使用 PowerShell 启动批处理文件
     const command = `powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c \"${batchFilePath}\"' "`;
@@ -220,70 +433,73 @@ function recoverBackup(player, output, backupFilename) {
 
     exec(command, (error, stdout, stderr) => {
     });
-
+	kickAllPlayers();
     mc.runcmdEx("stop"); // 立即关闭服务器
 }
 
 // 列出备份文件功能
-function listBackups(player, output) {
-    const backupPath = path.join(config.BackupPath);
+function listBackups(player, output, isPermanent = false) {
+    getAllBackupFilenames(isPermanent)
+        .then(backupFiles => {
+            if (backupFiles.length === 0) {
+                sendMessage(player, '没有找到任何备份文件。', 'info');
+            } else {
+                sendMessage(player, '找到以下备份文件:', 'info');
+                backupFiles.forEach(file => sendMessage(player, file, 'info'));
+            }
+        })
+        .catch(error => {
+            sendMessage(player, error, 'error');
+        });
+}
 
-    if (!File.exists(backupPath)) {
-        sendMessage(player, `备份路径不存在: ${backupPath}`, 'error');
+function uploadBackup(player, output, backupName, isPermanent = false) {
+    const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe');
+    const BackupDir = isPermanent ? config.PermanentBackupPath : config.BackupPath;
+    const BackupPath = path.resolve(BackupDir); // 转换为绝对路径
+    const sanitizedBackupName = backupName.replace(/['"]/g, ''); // 移除不必要的引号
+    const backupFilePath = path.resolve(BackupPath, sanitizedBackupName); // 转换为绝对路径
+    const remotePath = config.upload.remotePath;
+    const webdavUrl = config.upload.webdavUrl;
+    const username = config.upload.username;
+    const password = config.upload.password;
+
+    // 检查备份文件是否存在
+    if (!fs.existsSync(backupFilePath)) {
+        sendMessage(player, `备份文件未找到: ${backupFilePath}`, 'error');
         return;
     }
 
-    fs.readdir(backupPath, (err, files) => {
-        if (err) {
-            sendMessage(player, `读取备份目录失败: ${err}`, 'error');
-            return;
-        }
-        const backupFiles = files.filter(file => path.extname(file).toLowerCase() === '.zip');
-
-        if (backupFiles.length === 0) {
-            sendMessage(player, '没有找到任何备份文件。', 'info');
-        } else {
-            sendMessage(player, '找到以下备份文件:', 'info');
-            backupFiles.forEach(file => sendMessage(player, file, 'info'));
-        }
-    });
-}
-function uploadBackup(player, output, backupName) {
-    const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe');
-    const backupPath = path.resolve(config.BackupPath); // 转换为绝对路径
-    const sanitizedBackupName = backupName.replace(/['"]/g, ''); // 移除不必要的引号
-    const backupFilePath = path.resolve(backupPath, sanitizedBackupName); // 转换为绝对路径
-    const remotePath = config.upload.remotePath;
-    const webdavUrl = config.upload.webdavUrl;
-	const username = config.upload.username;
-	const password = config.upload.password;
-
-    if (!fs.existsSync(backupFilePath)) {
-    sendMessage(player, `Backup file not found: ${backupFilePath}`, 'error');
-    return;
-	}
-
+    // 构建命令
     const command = `"${exePath}" upload "${backupFilePath}" "${remotePath}" "${webdavUrl}" "${username}" "${password}"`;
 
+	//console.log(`${command}`);
+    // 执行上传命令
     exec(command, (error, stdout, stderr) => {
         if (error) {
-            sendMessage(player, `Error executing upload: ${error.message}`, 'error');
+            sendMessage(player, `上传时出错: ${error.message}`, 'error');
             return;
         }
 
         if (stderr) {
-            sendMessage(player, `Upload stderr: ${stderr}`, 'info');
+            sendMessage(player, `上传警告: ${stderr}`, 'warning');
             return;
         }
-        sendMessage(player, `Upload stdout: ${stdout}`, 'info');
+
+        sendMessage(player, `上传成功: ${stdout}`, 'info');
     });
 }
 
-// 删除备份文件功能
-function removeBackup(player, output, filename, isFromGUI = false) {
-    const backupPath = path.join(config.BackupPath, filename);
 
-    fs.unlink(backupPath, (err) => {
+// 删除备份文件功能
+function removeBackup(player, output, filename, isPermanent = false, isFromGUI = false) {
+    // 根据 isPermanent 判断使用哪个路径
+    const BackupPath = path.join(isPermanent ? config.PermanentBackupPath : config.BackupPath, filename);
+    if (!fs.existsSync(BackupPath)) {
+        sendMessage(player, `找到名为 "${backupName}" 的备份文件，操作已取消。`, 'error');
+        return; // 直接退出函数，不做任何操作
+		}
+    fs.unlink(BackupPath, (err) => {
         if (err) {
             sendMessage(player, `删除备份失败: ${err}`, 'error');
             return;
@@ -292,63 +508,75 @@ function removeBackup(player, output, filename, isFromGUI = false) {
         sendMessage(player, `备份 ${filename} 已成功删除`, 'info');
 
         if (isFromGUI) {
-            listBackupsGUI(player, output); // 重新显示备份列表
+            // 根据 isPermanent 判断重新显示哪个备份列表
+            if (isPermanent) {
+                listPermanentBackupsGUI(player, output);
+            } else {
+                listBackupsGUI(player, output);
+            }
         }
     });
 }
 
 
-function showBackupOptions(player, output, backupName) {
-    const fm = mc.newSimpleForm();
-    fm.setTitle(`备份: ${backupName}`);
-    fm.setContent("请选择一个操作：");
-    fm.addButton("删除备份");
-    fm.addButton("回档");
-    fm.addButton("重命名备份");
-    fm.addButton("上传云端");
 
-    player.sendForm(fm, (player, id) => {
-        if (id === null || id === undefined) {
-            return;
-        }
 
-        switch (id) {
-            case 0:
-                removeBackup(player, output, backupName);
-                break;
-            case 1:
-                recoverBackup(player, output, backupName);
-                break;
-            case 2:
-                renameBackupGUI(player, output, backupName);
-                break;
-            case 3:
-                uploadBackup(player, output, backupName);
-                break;
-            default:
-                sendMessage(player, "未知的选项", 'error');
-                break;
-        }
-    });
+
+function isValidFilename(filename) {
+    // Windows 不允许使用的字符
+    const invalidCharsPattern = /[\/\\:*?"<>|]/;
+
+    // Windows 不允许的文件名（设备名称）
+    const reservedNamesPattern = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
+
+    // 检查文件名是否包含不允许的字符，并且不是保留名称
+    return !invalidCharsPattern.test(filename) && !reservedNamesPattern.test(filename);
 }
 
-function renameBackup(player, output, filename, newname, isGUI = false) {
-    // 移除可能的引号
-    let sanitizedFilename = filename.replace(/"/g, '');
-    let sanitizedNewname = newname.replace(/"/g, '');
 
-    // 如果文件名不以 .zip 结尾，则添加 .zip
-    if (!sanitizedFilename.endsWith('.zip')) {
-        sanitizedFilename += '.zip';
+
+function renameBackup(player, output, filename, newname, isGUI = false ,isPermanent) {
+
+	// 移除可能的引号
+	let sanitizedFilename = filename.replace(/"/g, '');
+	let sanitizedNewname = newname.replace(/"/g, '');
+	
+	    // 检查文件名是否只包含有效字符
+    if (!isValidFilename(sanitizedFilename) || !isValidFilename(sanitizedNewname)) {
+        sendMessage(player, '重命名失败: 文件名只能包含英文字符、数字和部分符号。', 'error');
+        if (isGUI) {
+            player.sendModalForm(
+                "重命名失败",
+                '文件名只能包含英文字符、数字和部分符号。',
+                "重新命名",
+                "取消",
+                (player, result) => {
+                    if (result) {
+                        renameBackupGUI(player, output, filename,isPermanent); // 重新显示表单
+                    } 
+                }
+            );
+        }
+        return;
     }
-    if (!sanitizedNewname.endsWith('.zip')) {
-        sanitizedNewname += '.zip';
-    }
 
-    const backupPath = path.join(config.BackupPath, sanitizedFilename);
-    const newBackupPath = path.join(config.BackupPath, sanitizedNewname);
+	const extension = getExtensionByFormat(config.format);
 
-    if (fs.existsSync(newBackupPath)) {
+	// 如果文件名不以相应的扩展名结尾，则添加该扩展名
+	if (!sanitizedFilename.endsWith(extension)) {
+		sanitizedFilename += extension;
+	}
+	if (!sanitizedNewname.endsWith(extension)) {
+		sanitizedNewname += extension;
+	}
+
+    const BackupDir = isPermanent ? config.PermanentBackupPath : config.BackupPath;
+    const BackupPath = path.resolve(BackupDir); // 转换为绝对路径
+    
+    const FilenamePath = path.join(BackupPath, sanitizedFilename);
+    const NewnamePath = path.join(BackupPath, sanitizedNewname);
+
+    if (fs.existsSync(NewnamePath)) {
         sendMessage(player, `重命名失败: 备份名称 ${sanitizedNewname} 已经存在，请选择其他名称。`, 'error');
         if (isGUI) {
             player.sendModalForm(
@@ -366,26 +594,27 @@ function renameBackup(player, output, filename, newname, isGUI = false) {
         return;
     }
 
-    fs.rename(backupPath, newBackupPath, (err) => {
+    fs.rename(FilenamePath, NewnamePath, (err) => {
         if (err) {
             sendMessage(player, `重命名失败: ${err}`, 'error');
             return;
         }
         sendMessage(player, `备份 ${sanitizedFilename} 已重命名为 ${sanitizedNewname}`, 'info');
 
-        if (isGUI) {
-            listBackupsGUI(player, output); 
-        } else {
-            listBackups(player, output); 
+        if (isGUI && isPermanent) {
+            listPermanentBackupsGUI(player, output); 
+        }else if  (isGUI && !isPermanent){
+			listBackupsGUI(player, output); 
         }
     });
 }
 
 
-function renameBackupGUI(player, output, backupName) {
+function renameBackupGUI(player, output, backupName,isPermanent) {
+	const extension = getExtensionByFormat(config.format);
     const fm = mc.newCustomForm();
     fm.setTitle("重命名备份");
-    fm.addInput("新备份名称", "请输入新的备份名称", backupName.replace('.zip', ''));
+    fm.addInput("新备份名称", "请输入新的备份名称", backupName.replace(extension, ''));
 
     player.sendForm(fm, (player, data) => {
 
@@ -407,33 +636,141 @@ function renameBackupGUI(player, output, backupName) {
                 "取消",
                 (player, result) => {
                     if (result) {
-                        renameBackupGUI(player, output, backupName); // 重新显示表单
+                        renameBackupGUI(player, output, backupName,isPermanent); // 重新显示表单
                     } 
                 }
             );
             return;
         }
 
-        renameBackup(player, output, backupName, `${newName}.zip`, true);
+        renameBackup(player, output, backupName, `${newName}${extension}`, true, isPermanent);
+    });
+}
+
+function confirmTransferBackup(player, output, backupName, isPermanent = false, isFromGUI = false, remove = false) {
+    const sourcePath = path.resolve(isPermanent ? config.PermanentBackupPath : config.BackupPath, backupName);
+    const targetPath = path.resolve(isPermanent ? config.BackupPath : config.PermanentBackupPath, backupName);
+    
+        // 检查源路径是否存在
+    if (!fs.existsSync(sourcePath)) {
+        sendMessage(player, `源路径中没有找到名为 "${backupName}" 的备份文件，操作已取消。`, 'error');
+        return; // 直接退出函数，不做任何操作
+    }
+
+    // 检查目标路径是否存在同名文件夹
+    if (fs.existsSync(targetPath)) {
+        sendMessage(player, `目标路径中已存在名为 "${backupName}" 的备份文件，操作已取消。`, 'error');
+        return; // 直接退出函数，不做任何操作
+    }
+
+    if (isFromGUI) {
+        const fm = mc.newSimpleForm();
+        fm.setTitle("移动备份操作确认");
+        fm.setContent(`您确定要${isPermanent ? '移动到普通备份' : '添加到永久备份'}吗？\n请选择一个选项：`);
+        fm.addButton("保留原备份");
+        fm.addButton("复制并删除原备份");
+
+        // 发送表单并处理用户选择
+        player.sendForm(fm, (player, id) => {
+            if (id === null || id === undefined) {
+                return;
+            }
+
+            const deleteAfterCopy = id === 1; // 如果用户选择"移动并删除原备份"，则删除原备份
+
+            // 调用 copyFolder 函数执行复制操作
+            handleBackupTransfer(player, output, backupName, sourcePath, targetPath, deleteAfterCopy, isPermanent,isFromGUI);
+        });
+    } else {
+        // 不使用 GUI，直接执行默认的备份转移逻辑
+        const deleteAfterCopy = remove; // 使用传入的 remove 参数决定是否删除原备份
+
+        // 调用 copyFolder 函数执行复制操作
+        handleBackupTransfer(player, output, backupName, sourcePath, targetPath, deleteAfterCopy, isPermanent,isFromGUI);
+    }
+}
+
+function handleBackupTransfer(player, output, backupName, sourcePath, targetPath, deleteAfterCopy, isPermanent,isFromGUI) {
+    copyFolder(sourcePath, targetPath, deleteAfterCopy, (success) => {
+        if (success) {
+            sendMessage(player, `备份 ${backupName} 已成功${isPermanent ? '复制到普通备份' : '添加到永久备份'}${deleteAfterCopy ? '，并删除了原备份' : ''}`, 'info');
+        } else {
+            sendMessage(player, `备份 ${backupName} ${isPermanent ? '复制到普通备份' : '添加到永久备份'} 失败`, 'error');
+        }
+	if (isFromGUI) {
+        showBackupOptions(player, output, backupName, !isPermanent);
+        }
     });
 }
 
 
+function showBackupOptions(player, output, backupName, isPermanent) {
+    const fm = mc.newSimpleForm();
+    fm.setTitle(`${isPermanent ? '永久备份' : '备份'}: ${backupName}`);
+    fm.setContent("请选择一个操作：");
+    fm.addButton("查看属性"); // 新增查看属性的按钮
+    fm.addButton("删除备份");
+    fm.addButton("回档");
+    fm.addButton("重命名备份");
+    fm.addButton("上传云端");
+    fm.addButton(isPermanent ? "移除永久备份到普通备份" : "添加到永久备份");
 
-
-
-
-function listBackupsGUI(player, output) {
-    const backupPath = path.join(config.BackupPath);
-
-    fs.readdir(backupPath, (err, files) => {
-        if (err) {
-            sendMessage(player, `无法读取备份目录: ${err}`, 'error');
+    player.sendForm(fm, (player, id) => {
+        if (id === null || id === undefined) {
             return;
         }
 
-        const backups = files.filter(file => file.endsWith('.zip'));
+        switch (id) {
+            case 0:
+                showBackupProperties(player, backupName, isPermanent); 
+                break;
+            case 1:
+                removeBackup(player, output, backupName, isPermanent);
+                break;
+            case 2:
+                recoverBackup(player, output, backupName, isPermanent);
+                break;
+            case 3:
+                renameBackupGUI(player, output, backupName, isPermanent);
+                break;
+            case 4:
+                uploadBackup(player, output, backupName, isPermanent);
+                break;
+            case 5:
+                confirmTransferBackup(player, output, backupName, isPermanent);
+                break;
+            default:
+                sendMessage(player, "未知的选项", 'error');
+                break;
+        }
+    });
+}
 
+function showBackupProperties(player, backupName, isPermanent, output) {
+    const BackupPath = path.join(isPermanent ? config.PermanentBackupPath : config.BackupPath, backupName);
+
+    fs.stat(BackupPath, (err, stats) => {
+        if (err) {
+            sendMessage(player, `无法获取备份属性: ${err}`, 'error');
+            return;
+        }
+
+        const creationTime = stats.birthtime.toLocaleString();
+        const fileSize = formatSize(stats.size);
+        const fileName = path.basename(BackupPath);
+
+        const message = `文件名称: ${fileName}\n创建时间: ${creationTime}\n文件大小: ${fileSize}`;
+
+        player.sendModalForm("备份属性", message, "返回", "取消", (player, result) => {
+            if (result) {
+                showBackupOptions(player, output, backupName, isPermanent);
+            }
+        });
+    });
+}
+
+function listBackupsGUI(player, output) {
+    getAllBackupFilenames().then(backups => {
         if (backups.length === 0) {
             player.sendModalForm("备份列表", "没有找到任何备份文件。", "确定", "取消", (player, result) => {
                 if (result) {
@@ -457,33 +794,163 @@ function listBackupsGUI(player, output) {
             }
 
             const selectedBackup = backups[id];
-            showBackupOptions(player, output, selectedBackup);
+            showBackupOptions(player, output, selectedBackup, false); // 标记为非永久备份
         });
+    }).catch(error => {
+        sendMessage(player, error, 'error');
+    });
+}
+
+function listPermanentBackupsGUI(player, output) {
+        getAllBackupFilenames(true).then(backups => {
+        if (backups.length === 0) {
+            player.sendModalForm("永久备份列表", "没有找到任何备份文件。", "确定", "取消", (player, result) => {
+                if (result) {
+                    sendMessage(player, "已确认没有备份文件。", 'info');
+                }
+            });
+            return;
+        }
+
+        const fm = mc.newSimpleForm();
+        fm.setTitle("永久备份列表");
+        fm.setContent("请选择一个备份文件进行操作：");
+
+        backups.forEach(backup => {
+            fm.addButton(backup);
+        });
+
+        player.sendForm(fm, (player, id) => {
+            if (id === null || id === undefined) {
+                return;
+            }
+
+            const selectedBackup = backups[id];
+            showBackupOptions(player, output, selectedBackup, true); // 标记为永久备份
+        });
+    }).catch(error => {
+        sendMessage(player, error, 'error');
+    });
+}
+
+function cleanupOldBackups(BackupPath, maxAgeDays, callback) {
+    const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe'); // Rust 程序路径
+    const format = config.format;
+    // 构建执行命令
+    const command = `"${exePath}" cleanup "${BackupPath}" "${maxAgeDays}" "${format}"`;
+
+    // 执行命令
+    exec(command, (error, stdout, stderr) => {
+        if (error) {
+            sendMessage(null, `exec error: ${error.message}`, 'error');
+            callback(false);
+            return;
+        }
+        callback(true);
     });
 }
 
 
+function getBackupStats(callback) {
+	const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe');
+	const worldPath = path.resolve(`./worlds/${worldName}`);
+	const BackupPath = path.resolve(config.BackupPath);
+	const PermanentBackupPath = path.resolve(config.PermanentBackupPath); 
+	
+    const command = `"${exePath}" stats "${worldPath}" "${BackupPath}" "${PermanentBackupPath}"`;
+    exec(command, (error, stdout, stderr) => {
+        if (error) {
+            console.error(`Error executing Rust program: ${stderr}`);
+            callback(error, null);
+            return;
+        }
+
+        try {
+            const stats = JSON.parse(stdout);
+            callback(null, stats);
+        } catch (parseError) {
+            console.error(`Error parsing JSON: ${parseError.message}`);
+            callback(parseError, null);
+        }
+    });
+}
 
 
-// GUI 操作面板功能
+function showBackupStats(player, output, isFromGUI = false) {
+    getBackupStats((err, stats) => {
+        if (err) {
+            sendMessage(player, "获取备份信息失败。", 'error');
+            return;
+        }
+
+        // 构建备份信息内容
+        const backupInfo = `当前备份信息：
+        世界大小: ${formatSize(stats[0].size)}
+        世界文件数量: ${stats[0].file_count}
+        备份大小: ${formatSize(stats[1].size)}
+        备份文件数量: ${stats[1].file_count}
+        永久备份大小: ${formatSize(stats[2].size)}
+        永久备份文件数量: ${stats[2].file_count}`;
+
+        if (isFromGUI) {
+            // 如果是从GUI调用，显示图形界面
+            const fm = mc.newSimpleForm();
+            fm.setTitle("备份信息状态");
+            fm.setContent(backupInfo);
+            fm.addButton("返回");
+
+            player.sendForm(fm, (player, id) => {
+                if (id === null || id === undefined) {
+                    return;
+                }
+
+                switch (id) {
+                    case 0:
+                        backupGUI(player, output);
+                        break;
+                    default:
+                        sendMessage(player, "未知的选项", 'error');
+                        break;
+                }
+            });
+        } else {
+            // 否则，发送文本消息
+            sendMessage(player, backupInfo, 'info');
+        }
+    });
+}
+
+
 function backupGUI(player, output) {
     const fm = mc.newSimpleForm();
     fm.setTitle("备份管理");
     fm.setContent("请选择一个操作：");
     fm.addButton("备份");
+    fm.addButton("永久备份");
     fm.addButton("备份列表");
+    fm.addButton("永久备份列表");
+    fm.addButton("信息状态");
 
     player.sendForm(fm, (player, id) => {
-            if (id === null || id === undefined) {
-                return;
-            }
+        if (id === null || id === undefined) {
+            return;
+        }
 
         switch (id) {
             case 0:
-                backup(player, output);
+                backup(player, output,false);
                 break;
-            case 1:
+			case 1:
+                backup(player, output,true);
+                break;
+            case 2:
                 listBackupsGUI(player, output);
+                break;
+            case 3:
+                listPermanentBackupsGUI(player, output);
+                break;
+            case 4:
+                showBackupStats(player, output,true);
                 break;
             default:
                 sendMessage(player, "未知的选项", 'error');
@@ -491,86 +958,219 @@ function backupGUI(player, output) {
         }
     });
 }
+
+function getAllBackupFilenames(isPermanent = false) {
+    const BackupDir = isPermanent ? config.PermanentBackupPath : config.BackupPath;
+    const BackupPath = path.resolve(BackupDir); // 转换为绝对路径
+    const extension = getExtensionByFormat(config.format);
+
+    // 返回一个 Promise，异步获取所有备份文件名
+    return new Promise((resolve, reject) => {
+        // 检查备份路径是否存在
+        if (!fs.existsSync(BackupPath)) {
+            reject(`备份路径不存在: ${BackupPath}`);
+            return;
+        }
+
+        // 读取备份目录中的文件
+        fs.readdir(BackupPath, (err, files) => {
+            if (err) {
+                reject(`无法读取备份目录: ${err}`);
+                return;
+            }
+
+            // 过滤备份文件
+            const backups = files.filter(file => file.endsWith(extension));
+            resolve(backups);
+        });
+    });
+}
+
+
 function registerCommands() {
-    const cmd = mc.newCommand("backup", "Backup management", PermType.Any);
+    const cmd = mc.newCommand("backup", "Backup management", PermType.Any,0x80);
 
-    // 设置命令的枚举
-    cmd.setEnum("BackupAction", ["recover", "list", "remove", "gui", "rename", "upload"]);
+    let backupFilesEnum = new DynamicEnum(cmd, "BackupFiles");
+	let PbackupFilesEnum = new DynamicEnum(cmd, "PBackupFiles");
+	// 异步加载备份文件名
+	getAllBackupFilenames()
+		.then(files => {
+			backupFilesEnum.addValues(files); // 将文件名添加到 DynamicEnum 实例中
+			//console.log("备份文件名已加载:", files);
+		})
+		.catch(err => {
+			console.error(err);
+		});
+		
+	getAllBackupFilenames(true)
+		.then(files => {
+			PbackupFilesEnum.addValues(files);
+			//console.log("备份文件名已加载:", files);
+		})
+		.catch(err => {
+			console.error(err);
+		});
+	
 
-    // 添加命令参数
-    cmd.optional("action", ParamType.Enum, "BackupAction");
-    cmd.optional("filename", ParamType.RawText);
-    cmd.optional("newname", ParamType.RawText);
+	cmd.setEnum("GUIAction", ["gui"]);
+    cmd.setEnum("ListAction", ["list"]);
+    cmd.setEnum("StatsAction", ["stats"]);
+    
+    cmd.setEnum("RemoveAction", ["remove"]);
+    cmd.setEnum("UploadAction", ["upload"]);
+    cmd.setEnum("RecoverAction", ["recover"]);
+    cmd.setEnum("RenameAction", ["rename"]);
+    
+    cmd.setEnum("TransferAction", ["transfer"]);
+    cmd.setEnum("PTransferAction", ["transfer"]);
+    
+    cmd.setEnum("PListAction", ["list"]);
+    cmd.setEnum("PRemoveAction", ["remove"]);
+    cmd.setEnum("PUploadAction", ["upload"]);
+    cmd.setEnum("PRecoverAction", ["recover"]);
+    cmd.setEnum("PRenameAction", ["rename"]);
 
-    // 添加命令重载
+    
+    cmd.setEnum("PermanentAction", ["permanent"]);
+
+    cmd.setEnum("BackupFiles", []);
+    cmd.setEnum("PBackupFiles", []);
+
+    
+    cmd.mandatory("action", ParamType.Enum, "GUIAction", 1);
+    cmd.mandatory("action", ParamType.Enum, "ListAction", 1);
+    cmd.mandatory("action", ParamType.Enum, "StatsAction", 1)
+    
+    
+    cmd.mandatory("action", ParamType.Enum, "RemoveAction", 1);
+    cmd.mandatory("action", ParamType.Enum, "UploadAction", 1);
+    cmd.mandatory("action", ParamType.Enum, "RecoverAction", 1);
+	cmd.mandatory("action", ParamType.Enum, "RenameAction", 1);
+	
+	cmd.mandatory("action", ParamType.Enum, "TransferAction", 1)
+	
+	cmd.mandatory("action", ParamType.Enum, "PermanentAction", 1);
+	
+	cmd.mandatory("PermanentAction", ParamType.Enum, "PListAction",1);
+    cmd.mandatory("PermanentAction", ParamType.Enum, "PRecoverAction",1);
+    cmd.mandatory("PermanentAction", ParamType.Enum, "PUploadAction",1);
+    cmd.mandatory("PermanentAction", ParamType.Enum, "PRemoveAction",1);
+    cmd.mandatory("PermanentAction", ParamType.Enum, "PRenameAction",1);
+    cmd.mandatory("PermanentAction", ParamType.Enum, "PTransferAction", 1)
+    
+    cmd.mandatory("filename", ParamType.SoftEnum, "BackupFiles");
+    cmd.mandatory("pfilename", ParamType.SoftEnum, "PBackupFiles");
+	cmd.mandatory("newname", ParamType.RawText);
+	cmd.mandatory("remove", ParamType.Bool);
+    
     cmd.overload([]);
-    cmd.overload(["action"]);
-    cmd.overload(["action", "filename"]);
-    cmd.overload(["action", "filename", "newname"]);
+    cmd.overload(["GUIAction"]);
+    cmd.overload(["ListAction"]);
+    cmd.overload(["StatsAction"]);
+    
+    cmd.overload(["RemoveAction","filename"]);
+    cmd.overload(["UploadAction","filename"]);
+    cmd.overload(["RecoverAction","filename"]);
+    cmd.overload(["RenameAction","filename","newname"]);
+    cmd.overload(["TransferAction","filename","remove"]);
+    
+    cmd.overload(["PermanentAction"]);
+    cmd.overload(["PermanentAction","PListAction"]);
+    cmd.overload(["PermanentAction","PRemoveAction","pfilename"]);
+    cmd.overload(["PermanentAction","PUploadAction","pfilename"]);
+    cmd.overload(["PermanentAction","PRecoverAction","pfilename"]);
+    cmd.overload(["PermanentAction","PRenameAction","pfilename","newname"]);
+    cmd.overload(["PermanentAction","PTransferAction","pfilename","remove"]);
 
-    // 设置命令回调
+    // 设置命令回调函数
     cmd.setCallback((cmd, origin, output, results) => {
         const player = origin.player;
         const action = results.action;
-        const filename = results.filename;
-        const newname = results.newname;
 
-        // 获取 allowlist 配置
+        const PermanentAction = results.PermanentAction;
+
+		//console.log(`Debug Info: action = ${action}`);
+
+        // 获取权限配置
         const allowlist = config.allowlist;
 
         // 检查权限：控制台、管理员 (OP)、或在 allowlist 中的玩家
-        if (!player||player.isOP()||allowlist.includes(player.xuid)) {
-
-        if (!action) {
-            backup(player, output);
-        } else {
-            switch (action) {
-                case "recover":
-                    if (filename) {
-                        recoverBackup(player, output, filename);
-                    } else {
-                        sendMessage(player, "必须提供要恢复的备份文件名。", 'error');
+        if (!player || player.isOP() || allowlist.includes(player.xuid)) {
+            if (!action) {
+                backup(player, output,false);
+            } else if (action === "permanent") {
+                if (!PermanentAction) {
+					backup(player, output,true);
+                } else {
+                const filename = results.pfilename;
+                    switch (PermanentAction) {
+                        case "recover":
+                                recoverBackup(player, output, filename, true);
+                            break;
+                        case "list":
+                            listBackups(player, output, true);
+                            break;
+                        case "remove":
+                                removeBackup(player, output, filename, true);
+                            break;
+                        case "rename":
+                        const newname = results.newname;
+                                renameBackup(player, output, filename, newname, true);
+                            break;
+                        case "upload":
+                                uploadBackup(player, output, filename, true);
+                            break;
+						case "transfer":
+							confirmTransferBackup(player, output, filename, isPermanent = true, isFromGUI = false, remove = results.remove)
+                            break;
+                        default:
+                            sendMessage(player, "未知的永久备份操作。", 'error');
+                            break;
                     }
-                    break;
-                case "list":
-                    listBackups(player, output);
-                    break;
-                case "remove":
-                    if (filename) {
-                        removeBackup(player, output, filename);
-                    } else {
-                        sendMessage(player, "必须提供要删除的备份文件名。", 'error');
-                    }
-                    break;
-                case "gui":
-                    backupGUI(player, output);
-                    break;
-                case "rename":
-                    if (filename && newname) {
-                        renameBackup(player, output, filename, newname);
-                    } else {
-                        sendMessage(player, "必须提供要重命名的备份文件名和新名称。", 'error');
-                    }
-                    break;
-                case "upload":
-                    if (filename) {
-                        uploadBackup(player, output, filename);
-                    } else {
-                        sendMessage(player, "必须提供要上传的备份文件名。", 'error');
-                    }
-                    break;
-                default:
-                    output.error("未知的备份操作。");
+                }
+            } else {
+            const filename = results.filename;
+                // 处理普通备份的操作
+                switch (action) {
+                    case "recover":
+                            recoverBackup(player, output, filename);
+                        break;
+                    case "list":
+                        listBackups(player, output);
+                        break;
+                    case "remove":
+                            removeBackup(player, output, filename);
+                        break;
+                    case "gui":
+                        backupGUI(player, output);
+                        break;
+                    case "stats":
+                        showBackupStats(player, output);
+                        break;
+                    case "rename":
+                    const newname = results.newname;
+                            renameBackup(player, output, filename, newname);
+                        break;
+                    case "upload":
+                            uploadBackup(player, output, filename);
+                        break;
+                    case "transfer":
+							confirmTransferBackup(player, output, filename, isPermanent = false, isFromGUI = false, remove = results.remove)
+						break;
+                    default:
+                        sendMessage(player, "未知的备份操作。", 'error');
+                        break;
+                }
             }
+        } else {
+            sendMessage(player, "你没有权限执行此命令。", 'error');
         }
-     } else {
-        sendMessage(player, "你没有权限执行此命令。", 'error');
-     }
-        
     });
-
     cmd.setup();
 }
+
+
+
 
 mc.listen("onServerStarted", function() {
     init();
