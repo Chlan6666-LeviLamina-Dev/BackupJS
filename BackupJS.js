@@ -48,23 +48,32 @@ class DynamicEnum {
 ll.registerPlugin(
     "BackupJS",
     "A plugin to manage backups",
-    [0, 0, 3],
+    [0, 0, 5],
     {}
 );
 
 const pluginName = "BackupJS";
 const backup_tmp = "./backup_tmp";
 const worldName = /level-name=(.*)/.exec(File.readFrom('./server.properties'))[1];
+
+// 提前获取语言和成功消息，并打印到日志中进行调试
+const lang = getLangFromProperties();
+logger.info(`读取到的语言配置: ${lang}`)
+
+const successMessage = getSuccessMessage(lang);
+logger.info(`读取到的成功消息: ${successMessage}`)
+
+
 const configPath = "plugins/BackupJS/config.json";
 
 var defaultConfig = {
     Language: "zh_CN",
     MaxStorageTime: 7,
-    BackupPath: "./backup",
+    BackupPath: "./backup", 
     PermanentBackupPath: "./backup/permanent_backup",
     queryRetries: 10,     // 尝试次数
     retryDelay: 100,      // 每次重试之间的延迟（毫秒）根据加载区块计算
-    initialDelay: 50,      // 在第一次查询前的延迟（毫秒）根据加载区块计算
+    initialDelay: 50,     // 在第一次查询前的延迟（毫秒）根据加载区块计算
     format: "zip",
     Compress: 0,
     MaxWaitForZip: 1800,
@@ -72,13 +81,28 @@ var defaultConfig = {
     RecoveryBackupCore: "./plugins/BackupJS",
     serverExe: "bedrock_server_mod.exe",
     upload: {
-        remotePath: '/backup',
+        remotePath: '/backup',  // 如果文件上传失败: 403 Forbidden （用户名和密码是正确）可能是没有webdav创建文件夹失败导致的
         webdavUrl: 'https://xxx.com/webdav',
         username: '123',
-        password: '114514'
+        password: '114514',
+        allowInsecure: false   // 是否允许不安全的 HTTPS 连接（忽略证书验证）
     },
     allowlist: ["114514"]
 };
+
+function deepMerge(target, source) {
+    for (const key in source) {
+        if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+            if (!target[key] || typeof target[key] !== 'object') {
+                target[key] = {};
+            }
+            deepMerge(target[key], source[key]);
+        } else {
+            target[key] = source[key];
+        }
+    }
+    return target;
+}
 
 function readConfig() {
     let currentConfig = {};
@@ -97,8 +121,8 @@ function readConfig() {
         sendMessage(null, `Config file not found, creating default config at ${configPath}`, 'info');
     }
 
-    // 合并默认配置与现有配置
-    const mergedConfig = { ...defaultConfig, ...currentConfig };
+    //合并默认配置与现有配置
+    const mergedConfig = deepMerge(defaultConfig, currentConfig);
 
     // 检查是否有新的配置项需要写回文件
     const isConfigUpdated = JSON.stringify(mergedConfig) !== JSON.stringify(currentConfig);
@@ -306,61 +330,71 @@ function getExtensionByFormat(format) {
     }
 }
 
-function backup(player, output,isPermanent = false) {
+
+let isBackupInProgress = false;
+
+function backup(player, output, isPermanent = false) {
+    if (isBackupInProgress) {
+        sendMessage(player, "备份正在进行中，请稍后再试。", 'warn');
+        return;
+    }
+    isBackupInProgress = true;
     const startTime = new Date();
     const timestamp = system.getTimeStr().replace(/ /, '_').replace(/:/g, '-');
     const worldPath = `./worlds/${worldName}`;
     const BackupDir = isPermanent ? config.PermanentBackupPath : config.BackupPath;
     const zipFileName = path.resolve(BackupDir, `${worldName}_${timestamp}`);
     const maxAgeDays = config.MaxStorageTime;
-	const retries = config.queryRetries;
-	const delayBetweenRetries = config.retryDelay;
-	const delayBeforeFirstQuery = config.initialDelay;
+    const retries = config.queryRetries;
+    const delayBetweenRetries = config.retryDelay;
+    const delayBeforeFirstQuery = config.initialDelay;
 
     if (!fs.existsSync(config.BackupPath)) {
         fs.mkdirSync(config.BackupPath);
     }
     sendMessage(player, "开始执行备份...", 'info');
 
-    if (maxAgeDays !== -1) {
-        cleanupOldBackups(config.BackupPath, maxAgeDays, (cleanupResult) => {
-            if (cleanupResult) {
-                sendMessage(player, "旧备份清理完成", 'info');
-            } else {
-                sendMessage(player, "清理失败", 'error');
-            }
-        });
-    } else {
-        sendMessage(player, "跳过旧备份清理", 'info');
-    }
+	if (isPermanent) {
+	} else if (maxAgeDays !== -1) {
+		// 如果 maxAgeDays 有效且不是永久备份，执行旧备份清理
+		cleanupOldBackups(config.BackupPath, maxAgeDays, (cleanupResult) => {
+			if (cleanupResult) {
+				sendMessage(player, "旧备份清理完成", 'info');
+			} else {
+				sendMessage(player, "清理失败", 'error');
+			}
+		});
+	} else {
+		sendMessage(player, "跳过旧备份清理", 'info');
+	}
+
 
     const holdResult = mc.runcmdEx("save hold");
     if (!holdResult.success) {
-		mc.runcmdEx("save resume");
-        sendMessage(player, "保存状态保持失败，备份中止。", 'error');
+        mc.runcmdEx("save resume");
+        sendMessage(player, "尝试暂停世界存储时发生错误，备份中止。", 'error');
+        isBackupInProgress = false;
         return;
     }
-    sendMessage(player, "世界保存状态已保持。", 'info');
+
     function tryQuerySaveState(attempt) {
         if (attempt > retries) {
-			mc.runcmdEx("save resume");
+            mc.runcmdEx("save resume");
             sendMessage(player, "多次尝试查询保存状态失败，放弃备份。", 'error');
+            isBackupInProgress = false;
             return;
         }
 
         const queryResult = mc.runcmdEx("save query");
-
-        //onsole.log("save query result:", queryResult);
-
-        const successPattern = /Data saved\. Files are now ready to be copied\./;
-
+		const successPattern = new RegExp(`^${successMessage}.*`);
         if (queryResult.success && successPattern.test(queryResult.output)) {
-            sendMessage(player, "世界数据已保存，可以开始备份。", 'info');
+            sendMessage(player, "数据已保存，可以开始复制。", 'info');
 
             copyFolder(worldPath, backup_tmp, false, (result) => {
+                mc.runcmdEx("save resume");
+
                 if (result) {
-					mc.runcmdEx("save resume");
-                    sendMessage(player, "世界数据复制完成。", 'info');
+                    sendMessage(player, "数据复制完成。", 'info');
 
                     compressFolder(backup_tmp, zipFileName, (compressResult, fileSize) => {
                         const endTime = new Date();
@@ -373,10 +407,12 @@ function backup(player, output,isPermanent = false) {
                         } else {
                             sendMessage(player, "压缩失败", 'error');
                         }
+
+                        isBackupInProgress = false;
                     });
                 } else {
-					mc.runcmdEx("save resume");
-                    sendMessage(player, "世界数据复制失败。", 'error');
+                    sendMessage(player, "数据复制失败。", 'error');
+                    isBackupInProgress = false;
                 }
             });
         } else {
@@ -386,6 +422,58 @@ function backup(player, output,isPermanent = false) {
     }
 
     setTimeout(() => tryQuerySaveState(1), delayBeforeFirstQuery);
+}
+
+function getLangFromProperties() {
+    const serverPropertiesPath = path.resolve('./server.properties');
+    let lang = 'en_US'; // 默认语言
+
+    try {
+        const propertiesContent = fs.readFileSync(serverPropertiesPath, 'utf8');
+        // 逐行处理内容，忽略以 # 开头的注释行
+        const lines = propertiesContent.split('\n');
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            // 忽略注释行
+            if (trimmedLine.startsWith('#')) {
+                continue;
+            }
+            const match = /language\s*=\s*(.*)/.exec(trimmedLine);
+            if (match) {
+                lang = match[1].trim(); // 去掉前后空白
+                break; // 找到语言设置后可以退出循环
+            }
+        }
+    } catch (err) {
+        console.error(`Error reading server.properties: ${err.message}`);
+    }
+
+    return lang;
+}
+
+function getSuccessMessage(lang) {
+    const langFilePath = path.resolve(`./resource_packs/vanilla/texts/${lang}.lang`);
+
+    try {
+        const langFileContent = fs.readFileSync(langFilePath, 'utf8');
+
+        // 匹配成功消息，并保留末尾的句号
+        const match = /commands\.save-all\.success\s*=\s*(.*?)(?=\s*(#|$))/.exec(langFileContent);
+
+        if (match) {
+            let message = match[1].trim();
+            
+            // 保留最后的句号并去掉之后的空白
+            message = message.replace(/\s*[。.]?\s*$/, match => match.trim());
+            return message;
+        }
+
+        // 如果未匹配到，则返回默认英文消息
+        return 'Data saved. Files are now ready to be copied.';
+    } catch (err) {
+        console.error(`Error reading language file (${langFilePath}): ${err.message}`);
+        return 'Data saved. Files are now ready to be copied.'; // 默认值
+    }
 }
 
 
@@ -463,7 +551,8 @@ function uploadBackup(player, output, backupName, isPermanent = false) {
     const webdavUrl = config.upload.webdavUrl;
     const username = config.upload.username;
     const password = config.upload.password;
-
+    const allowInsecure = config.upload.allowInsecure ? 'true' : 'false'; // 转换为字符串 'true' 或 'false'
+    
     // 检查备份文件是否存在
     if (!fs.existsSync(backupFilePath)) {
         sendMessage(player, `备份文件未找到: ${backupFilePath}`, 'error');
@@ -471,9 +560,9 @@ function uploadBackup(player, output, backupName, isPermanent = false) {
     }
 
     // 构建命令
-    const command = `"${exePath}" upload "${backupFilePath}" "${remotePath}" "${webdavUrl}" "${username}" "${password}"`;
+    const command = `"${exePath}" upload "${backupFilePath}" "${remotePath}" "${webdavUrl}" "${username}" "${password}" ${allowInsecure}`;
 
-	//console.log(`${command}`);
+    //console.log(`${command}`);
     // 执行上传命令
     exec(command, (error, stdout, stderr) => {
         if (error) {
@@ -489,6 +578,7 @@ function uploadBackup(player, output, backupName, isPermanent = false) {
         sendMessage(player, `上传成功: ${stdout}`, 'info');
     });
 }
+
 
 
 // 删除备份文件功能
@@ -737,7 +827,7 @@ function showBackupOptions(player, output, backupName, isPermanent) {
                 uploadBackup(player, output, backupName, isPermanent);
                 break;
             case 5:
-                confirmTransferBackup(player, output, backupName, isPermanent);
+                confirmTransferBackup(player, output, backupName, isPermanent,isFromGUI=true);
                 break;
             default:
                 sendMessage(player, "未知的选项", 'error');

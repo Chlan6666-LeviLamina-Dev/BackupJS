@@ -1,5 +1,3 @@
-
-
 use std::env;
 use std::fs;
 use std::str;
@@ -11,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::path::{Path};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
-use reqwest::Client;
+use reqwest::{Client};
 use rayon::prelude::*;
 use futures::future::BoxFuture;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,13 +77,20 @@ fn upload_directory<'a>(client: &'a Client, dir_path: &'a Path, base_url: &'a st
     }.boxed()
 }
 
-async fn upload_backup(file_path: &Path, webdav_url: &str, remote_path: &str, username: &str, password: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
+async fn upload_backup(file_path: &Path, webdav_url: &str, remote_path: &str, username: &str, password: &str, allow_insecure: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // 允许不安全的 HTTPS 连接（根据参数决定）
+    let client_builder = reqwest::Client::builder();
+
+    let client = if allow_insecure {
+        client_builder.danger_accept_invalid_certs(true).build()?
+    } else {
+        client_builder.build()?
+    };
 
     if file_path.is_file() {
         // 如果是文件，上传文件
         let file_name = file_path.file_name().unwrap().to_str().unwrap();
-        let remote_file_url = format!("{}/{}", webdav_url.strip_suffix('/').unwrap_or(webdav_url), remote_path.strip_prefix('/').unwrap_or(remote_path).to_string() + "/" + file_name);
+        let remote_file_url = format!("{}/{}", webdav_url.trim_end_matches('/'), format!("{}/{}", remote_path.trim_start_matches('/'), file_name));
         println!("准备上传文件到: {}", remote_file_url); // 调试信息
         upload_file(&client, file_path, &remote_file_url, username, password).await
     } else if file_path.is_dir() {
@@ -401,8 +406,8 @@ async fn main() {
         }
 
         "upload" => {
-            if args.len() < 7 {
-                eprintln!("Usage for upload: {} upload <backup_file> <remote_path> <webdav_url> <username> <password>", args[0]);
+            if args.len() < 8 {
+                eprintln!("Usage for upload: {} upload <backup_file> <remote_path> <webdav_url> <username> <password> <allow_insecure>", args[0]);
                 std::process::exit(1);
             }
 
@@ -411,8 +416,9 @@ async fn main() {
             let webdav_url = &args[4];
             let username = &args[5];
             let password = &args[6];
+            let allow_insecure: bool = args[7].parse().unwrap_or(false);
 
-            if let Err(e) = upload_backup(backup_file, webdav_url, remote_path, username, password).await {
+            if let Err(e) = upload_backup(backup_file, webdav_url, remote_path, username, password, allow_insecure).await {
                 eprintln!("Error during file upload: {}", e);
                 std::process::exit(1);
             }
