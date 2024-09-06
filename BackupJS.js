@@ -48,7 +48,7 @@ class DynamicEnum {
 ll.registerPlugin(
     "BackupJS",
     "A plugin to manage backups",
-    [0, 0, 5],
+    [0, 0, 6],
     {}
 );
 
@@ -140,13 +140,17 @@ function readConfig() {
 
 const config = readConfig();
 
- 
-function initializeBackupPaths() {
-    // 确保临时备份路径存在并清理旧的临时文件
+function resettmp() {
     if (fs.existsSync(backup_tmp)) {
         fs.rmSync(backup_tmp, { recursive: true, force: true });
     }
     fs.mkdirSync(backup_tmp, { recursive: true });
+}
+
+ 
+function initializeBackupPaths() {
+    // 确保临时备份路径存在并清理旧的临时文件
+	resettmp();
 
     // 确保普通备份路径和永久备份路径存在
     const backupDirs = [config.BackupPath, config.PermanentBackupPath];
@@ -330,6 +334,26 @@ function getExtensionByFormat(format) {
     }
 }
 
+function copydb(source, target, db, callback) {
+    const exePath = path.resolve(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe'); // Rust 程序路径
+
+    const tempDbFile = path.resolve(config.BackupPath, 'db_list.txt');
+    fs.writeFileSync(tempDbFile, db + '\n', 'utf8'); 
+
+    // 将 db 列表的文件路径传递给命令行
+    let command = `"${exePath}" copy_db "${source}" "${target}" "${tempDbFile}"`;
+    //console.log(`${command}`);
+    
+    exec(command, (error, stdout, stderr) => {
+        if (error) {
+            sendMessage(null, `exec error: ${error}`, 'error');
+            callback(false);
+            return;
+        }
+        callback(true);
+    });
+}
+
 
 let isBackupInProgress = false;
 
@@ -388,12 +412,13 @@ function backup(player, output, isPermanent = false) {
         const queryResult = mc.runcmdEx("save query");
 		const successPattern = new RegExp(`^${successMessage}.*`);
         if (queryResult.success && successPattern.test(queryResult.output)) {
+         const db = queryResult.output.replace(successPattern, '').trim();
+			//console.log(`DB 文件信息: ${db}`);  // 记录日志
             sendMessage(player, "数据已保存，可以开始复制。", 'info');
 
-            copyFolder(worldPath, backup_tmp, false, (result) => {
-                mc.runcmdEx("save resume");
-
+            copydb(worldPath, backup_tmp, db, (result) => {
                 if (result) {
+					mc.runcmdEx("save resume");
                     sendMessage(player, "数据复制完成。", 'info');
 
                     compressFolder(backup_tmp, zipFileName, (compressResult, fileSize) => {
@@ -404,6 +429,7 @@ function backup(player, output, isPermanent = false) {
                             const formattedSize = formatSize(fileSize);
                             const formattedDuration = formatDuration(duration);
                             sendMessage(player, `备份完成，总耗时 ${formattedDuration}，文件大小 ${formattedSize}`, 'info');
+                            resettmp();
                         } else {
                             sendMessage(player, "压缩失败", 'error');
                         }
