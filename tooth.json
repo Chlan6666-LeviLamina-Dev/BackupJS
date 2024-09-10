@@ -1,7 +1,7 @@
 {
     "format_version": 2,
     "tooth": "github.com/Chlan6666-LeviLamina-Dev/BackupJS",
-    "version": "0.0.6",
+    "version": "0.0.7",
     "info": {
         "name": "BackupJS",
         "description": "你说的对BackupJS是一个采用js和rust编写开源的备份插件。",
@@ -14,7 +14,7 @@
             "backup"
         ]
     },
-    "asset_url": "https://github.com/Chlan6666-LeviLamina-Dev/BackupJS/releases/download/v0.0.6/BackupJS.zip",
+    "asset_url": "https://github.com/Chlan6666-LeviLamina-Dev/BackupJS/releases/download/v0.0.7/BackupJS.zip",
     "files": {
         "place": [
             {

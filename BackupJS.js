@@ -48,7 +48,7 @@ class DynamicEnum {
 ll.registerPlugin(
     "BackupJS",
     "A plugin to manage backups",
-    [0, 0, 6],
+    [0, 0, 7],
     {}
 );
 
@@ -542,7 +542,7 @@ function recoverBackup(player, output, backupFilename,isPermanent = false) {
 	fs.writeFileSync(batchFilePath, batchContent, { encoding: 'utf8' });
 
     // 使用 PowerShell 启动批处理文件
-    const command = `powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c \"${batchFilePath}\"' "`;
+    const command = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd -ArgumentList '/c \"${batchFilePath}\"' "`;
     console.log(`启动恢复程序: ${command}`); // 输出命令以供调试
 
     exec(command, (error, stdout, stderr) => {
@@ -590,6 +590,7 @@ function uploadBackup(player, output, backupName, isPermanent = false) {
 
     //console.log(`${command}`);
     // 执行上传命令
+     sendMessage(player, "正在上传中...", 'info');
     exec(command, (error, stdout, stderr) => {
         if (error) {
             sendMessage(player, `上传时出错: ${error.message}`, 'error');
@@ -600,8 +601,14 @@ function uploadBackup(player, output, backupName, isPermanent = false) {
             sendMessage(player, `上传警告: ${stderr}`, 'warning');
             return;
         }
+        const cleanedOutput = stdout
+		  // 去除日期时间戳和 [INFO] 部分
+		  .replace(/\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[INFO\] /g, '')
+		  // 去除 ANSI 颜色控制符
+		  .replace(/\x1b\[[0-9;]*m/g, '')
+		  .trim();
 
-        sendMessage(player, `上传成功: ${stdout}`, 'info');
+        sendMessage(player, `上传成功: ${cleanedOutput}`, 'info');
     });
 }
 
