@@ -2,7 +2,7 @@ use std::{fs, io, thread};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use crate::{error, info};
+use tracing::{error, info};
 
 pub fn delete_old_backups(backup_path: &Path, max_age_days: u64, extension: &str) -> io::Result<()> {
     let now = SystemTime::now();

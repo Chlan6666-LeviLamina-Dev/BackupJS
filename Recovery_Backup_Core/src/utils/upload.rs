@@ -4,7 +4,7 @@ use std::path::Path;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use reqwest::Client;
-use crate::{error, info};
+use tracing::{error, info};
 
 pub async fn upload_file(client: &Client, file_path: &Path, url: &str, username: &str, password: &str) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(file_path)?;

@@ -1,18 +1,21 @@
 use std::env;
-use std::str;
 use std::path::{Path};
+use base64::Engine;
+use base64::engine::general_purpose;
 use rayon::prelude::*;
-use Recovery_Backup_Core::{error, info};
+use tracing::{error, info};
 use Recovery_Backup_Core::utils::cleanup::delete_old_backups;
 use Recovery_Backup_Core::utils::copy::copy_dir_recursive;
 use Recovery_Backup_Core::utils::copy_db::copy_db;
+use Recovery_Backup_Core::utils::logger::init_logger;
 use Recovery_Backup_Core::utils::recover::recover_backup;
 use Recovery_Backup_Core::utils::stats::{get_directory_stats_sync, DirectoryStats};
 use Recovery_Backup_Core::utils::upload::upload_backup;
-use Recovery_Backup_Core::utils::utils::is_base64_encoded;
+use Recovery_Backup_Core::utils::utils::{is_base64_encoded, send_request};
 
 #[tokio::main]
 async fn main() {
+    init_logger();
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         error!("Usage: {} <operation> [additional arguments...]", args[0]);
@@ -83,7 +86,7 @@ async fn main() {
             }
         }
         "recover" => {
-            if args.len() != 7 {
+            if args.len() < 7 || args.len() > 9 {
                 error!("Usage for recover: {} recover <backup_file> <target_dir> <world_name> <server_exe> <7za_exe>", args[0]);
                 std::process::exit(1);
             }
@@ -93,8 +96,8 @@ async fn main() {
 
             // 判断是否是 Base64 编码
             if is_base64_encoded(backup_file_arg) {
-                match base64::decode(backup_file_arg) {
-                    Ok(decoded) => match str::from_utf8(&decoded) {
+                match general_purpose::STANDARD.decode(backup_file_arg) {
+                    Ok(decoded) => match std::str::from_utf8(&decoded) {
                         Ok(decoded_str) => decoded_backup_file = decoded_str.to_string(),
                         Err(e) => {
                             error!("Error decoding Base64 to UTF-8: {}", e);
@@ -116,7 +119,11 @@ async fn main() {
             let server_exe = &args[5];
             let seven_zip_path = Path::new(&args[6]);
 
-            if let Err(e) = recover_backup(&backup_file, &target_dir, world_name, server_exe, &seven_zip_path) {
+            let mut url = if args.len() > 7 { Some(args[7].as_str()) } else { None };
+            let mut auth = if args.len() > 8 { Some(args[8].as_str()) } else { None };
+
+
+            if let Err(e) = recover_backup(&backup_file, &target_dir, world_name, server_exe, &seven_zip_path,url,auth) {
                 error!("Error during backup recovery: {}", e);
                 std::process::exit(1);
             }
@@ -141,8 +148,8 @@ async fn main() {
             }
         }
         "stats" => {
-            if args.len() != 5 {
-                error!("Usage for stats: {} stats <worldPath> <BackupPath> <PermanentBackupPath>", args[0]);
+            if args.len() < 5 || args.len() > 7 {
+                error!("Usage for stats: {} stats <worldPath> <BackupPath> <PermanentBackupPath> [url] [auth]", args[0]);
                 std::process::exit(1);
             }
 
@@ -150,9 +157,28 @@ async fn main() {
             let backup_path = Path::new(&args[3]);
             let permanent_backup_path = Path::new(&args[4]);
 
+            let mut url = if args.len() > 5 { Some(args[5].as_str()) } else { None };
+            let mut auth = if args.len() > 6 { Some(args[6].as_str()) } else { None };
+
+            // 检查参数规则
+            if url.is_some() && auth.is_none() {
+                error!("If url is provided, auth must also be provided.");
+                std::process::exit(1);
+            }
+
             let (world_size, world_count) = get_directory_stats_sync(world_path).unwrap();
             let (backup_size, backup_count) = get_directory_stats_sync(backup_path).unwrap();
             let (permanent_backup_size, permanent_backup_count) = get_directory_stats_sync(permanent_backup_path).unwrap();
+
+            // 检查 API 状态
+            let api_status = if let Some(url) = url {
+                send_request(url,  auth).unwrap_or_else(|e| {
+                    error!("Failed to check API status: {}", e);
+                    "unknown".to_string() // 返回状态未知
+                })
+            } else {
+                "not checked".to_string()
+            };
 
             let stats = vec![
                 DirectoryStats {
@@ -172,9 +198,15 @@ async fn main() {
                 },
             ];
 
-            let json_output = serde_json::to_string(&stats).unwrap();
-            println!("{}", json_output);
+                let json_output = serde_json::json!({
+            "directories": stats,
+            "api_status": api_status,
+        });
+
+                println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
         }
+
+
         _ => {
             error!("Unknown operation: {}", operation);
             std::process::exit(1);

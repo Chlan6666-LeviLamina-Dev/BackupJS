@@ -87,7 +87,19 @@ var defaultConfig = {
         password: '114514',
         allowInsecure: false   // 是否允许不安全的 HTTPS 连接（忽略证书验证）
     },
-    allowlist: ["114514"]
+    allowlist: ["114514"],
+    Serein:{
+    enabled: false,
+    id:"myserver",
+    host:"http://127.0.0.1:61545",
+    auth:"abcd",
+    pmid:"",
+    gmid:"",
+	msg: {
+		Processing:"正在回档",
+		Success:"回档成功"
+        }
+    }
 };
 
 function deepMerge(target, source) {
@@ -337,7 +349,7 @@ function getExtensionByFormat(format) {
 function copydb(source, target, db, callback) {
     const exePath = path.resolve(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe'); // Rust 程序路径
 
-    const tempDbFile = path.resolve(config.BackupPath, 'db_list.txt');
+    const tempDbFile = path.resolve(backup_tmp, 'db_list.txt');
     fs.writeFileSync(tempDbFile, db + '\n', 'utf8'); 
 
     // 将 db 列表的文件路径传递给命令行
@@ -514,7 +526,37 @@ function recoverBackup(player, output, backupFilename,isPermanent = false) {
     const serverExe = config.serverExe;
     const serverDir = path.resolve("."); // 服务器目录路径
     const sevenZipPath = path.resolve(config["7za"], '7za.exe'); // 7za 的路径
-    
+    let url = '';
+    let auth = '';
+	if (config.Serein.enabled) {                     
+		auth = config.Serein.auth;
+		id = config.Serein.id;
+		pmid = config.Serein.pmid || ''; // 从配置中获取 pmid，默认值为空字符串
+		gmid = config.Serein.gmid || ''; // 从配置中获取 gmid，默认值为空字符串
+		msg = config.Serein.msg || {};   // 从配置中获取 msg，默认值为空字符串
+		url = `${config.Serein.host}/serein/{}?id=${id}`;
+		// 动态添加可选参数
+		if (pmid) {
+			url += `&pmid=${pmid}`;
+		}
+		if (gmid) {
+			url += `&gmid=${gmid}`;
+		}
+	if (msg && msg.Processing && msg.Success) {
+		const encodedProcessing = Buffer.from(msg.Processing, 'utf-8').toString('base64');
+		const encodedSuccess = Buffer.from(msg.Success, 'utf-8').toString('base64');
+		
+        url += `&msg=${encodedProcessing}`;
+        url += `&msg=${encodedSuccess}`;
+		}
+		
+	if (!url || !auth || !id) {
+		sendMessage(player, "配置错误：url 或 auth 或 id 参数不能为空！", 'error');
+		return;
+		}
+	
+	}
+	
     // 将路径转换为 Base64 编码 绕过中文路径
     const base64BackupFilePath = Buffer.from(backupFilePath).toString('base64');
 
@@ -532,10 +574,10 @@ function recoverBackup(player, output, backupFilename,isPermanent = false) {
         return;
     }
 
-	const batchContent = `
-	@echo off
-	"${exePath}" recover "${base64BackupFilePath}" "${serverDir}" "${worldName}" "${serverExe}" "${sevenZipPath}"
-	`;
+const batchContent = `
+@echo off
+"${exePath}" recover "${base64BackupFilePath}" "${serverDir}" "${worldName}" "${serverExe}" "${sevenZipPath}"${url ? ` "${url}"` : ''}${auth ? ` "${auth}"` : ''}`;
+
 
 	// 使用 UTF-8 编码写入批处理文件
 	const batchFilePath = path.resolve(__dirname, 'startup_script.bat');
@@ -548,7 +590,10 @@ function recoverBackup(player, output, backupFilename,isPermanent = false) {
     exec(command, (error, stdout, stderr) => {
     });
 	kickAllPlayers();
-    mc.runcmdEx("stop"); // 立即关闭服务器
+	 if (!config.Serein.enabled) {
+		mc.runcmdEx("stop");
+	}
+
 }
 
 // 列出备份文件功能
@@ -828,48 +873,7 @@ function handleBackupTransfer(player, output, backupName, sourcePath, targetPath
 
 
 function showBackupOptions(player, output, backupName, isPermanent) {
-    const fm = mc.newSimpleForm();
-    fm.setTitle(`${isPermanent ? '永久备份' : '备份'}: ${backupName}`);
-    fm.setContent("请选择一个操作：");
-    fm.addButton("查看属性"); // 新增查看属性的按钮
-    fm.addButton("删除备份");
-    fm.addButton("回档");
-    fm.addButton("重命名备份");
-    fm.addButton("上传云端");
-    fm.addButton(isPermanent ? "移除永久备份到普通备份" : "添加到永久备份");
 
-    player.sendForm(fm, (player, id) => {
-        if (id === null || id === undefined) {
-            return;
-        }
-
-        switch (id) {
-            case 0:
-                showBackupProperties(player, backupName, isPermanent); 
-                break;
-            case 1:
-                removeBackup(player, output, backupName, isPermanent);
-                break;
-            case 2:
-                recoverBackup(player, output, backupName, isPermanent);
-                break;
-            case 3:
-                renameBackupGUI(player, output, backupName, isPermanent);
-                break;
-            case 4:
-                uploadBackup(player, output, backupName, isPermanent);
-                break;
-            case 5:
-                confirmTransferBackup(player, output, backupName, isPermanent,isFromGUI=true);
-                break;
-            default:
-                sendMessage(player, "未知的选项", 'error');
-                break;
-        }
-    });
-}
-
-function showBackupProperties(player, backupName, isPermanent, output) {
     const BackupPath = path.join(isPermanent ? config.PermanentBackupPath : config.BackupPath, backupName);
 
     fs.stat(BackupPath, (err, stats) => {
@@ -883,14 +887,45 @@ function showBackupProperties(player, backupName, isPermanent, output) {
         const fileName = path.basename(BackupPath);
 
         const message = `文件名称: ${fileName}\n创建时间: ${creationTime}\n文件大小: ${fileSize}`;
+            const fm = mc.newSimpleForm();
+		fm.setTitle(`${isPermanent ? '永久备份' : '备份'}: ${backupName}`);
+		fm.setContent(`${message}\n请选择一个操作：`);
+		fm.addButton("删除备份");
+		fm.addButton("回档");
+		fm.addButton("重命名备份");
+		fm.addButton("上传云端");
+		fm.addButton(isPermanent ? "移除永久备份到普通备份" : "添加到永久备份");
 
-        player.sendModalForm("备份属性", message, "返回", "取消", (player, result) => {
-            if (result) {
-                showBackupOptions(player, output, backupName, isPermanent);
-            }
-        });
+    player.sendForm(fm, (player, id) => {
+        if (id === null || id === undefined) {
+            return;
+        }
+
+        switch (id) {
+            case 0:
+                removeBackup(player, output, backupName, isPermanent);
+                break;
+            case 1:
+                recoverBackup(player, output, backupName, isPermanent);
+                break;
+            case 2:
+                renameBackupGUI(player, output, backupName, isPermanent);
+                break;
+            case 3:
+                uploadBackup(player, output, backupName, isPermanent);
+                break;
+            case 4:
+                confirmTransferBackup(player, output, backupName, isPermanent,isFromGUI=true);
+                break;
+            default:
+                sendMessage(player, "未知的选项", 'error');
+                break;
+        }
     });
+    });
+
 }
+
 
 function listBackupsGUI(player, output) {
     getAllBackupFilenames().then(backups => {
@@ -975,12 +1010,24 @@ function cleanupOldBackups(BackupPath, maxAgeDays, callback) {
 
 
 function getBackupStats(callback) {
-	const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe');
-	const worldPath = path.resolve(`./worlds/${worldName}`);
-	const BackupPath = path.resolve(config.BackupPath);
-	const PermanentBackupPath = path.resolve(config.PermanentBackupPath); 
-	
-    const command = `"${exePath}" stats "${worldPath}" "${BackupPath}" "${PermanentBackupPath}"`;
+    const exePath = path.join(config.RecoveryBackupCore, 'Recovery_Backup_Core.exe');
+    const worldPath = path.resolve(`./worlds/${worldName}`);
+    const BackupPath = path.resolve(config.BackupPath);
+    const PermanentBackupPath = path.resolve(config.PermanentBackupPath);
+    let url = '';
+    let auth = '';
+
+    if (config.Serein.enabled) {                     
+        url = `${config.Serein.host}/serein/health`;
+        auth = config.Serein.auth;
+		if (!url || !auth || !id) {
+			sendMessage(player, "配置错误：url 或 auth 或 id 参数不能为空！", 'error');
+			return;
+		}
+    }
+
+    const command = `"${exePath}" stats "${worldPath}" "${BackupPath}" "${PermanentBackupPath}"${url ? ` "${url}"` : ''}${auth ? ` "${auth}"` : ''}`;
+
     exec(command, (error, stdout, stderr) => {
         if (error) {
             console.error(`Error executing Rust program: ${stderr}`);
@@ -989,6 +1036,7 @@ function getBackupStats(callback) {
         }
 
         try {
+            //console.log("Command output (stdout):", stdout);
             const stats = JSON.parse(stdout);
             callback(null, stats);
         } catch (parseError) {
@@ -999,6 +1047,8 @@ function getBackupStats(callback) {
 }
 
 
+
+
 function showBackupStats(player, output, isFromGUI = false) {
     getBackupStats((err, stats) => {
         if (err) {
@@ -1006,14 +1056,21 @@ function showBackupStats(player, output, isFromGUI = false) {
             return;
         }
 
+        let apiStatus = '';
+
+        if (config.Serein.enabled) {
+            apiStatus = stats.api_status;
+        }
+
         // 构建备份信息内容
-        const backupInfo = `当前备份信息：
-        世界大小: ${formatSize(stats[0].size)}
-        世界文件数量: ${stats[0].file_count}
-        备份大小: ${formatSize(stats[1].size)}
-        备份文件数量: ${stats[1].file_count}
-        永久备份大小: ${formatSize(stats[2].size)}
-        永久备份文件数量: ${stats[2].file_count}`;
+const backupInfo = `${config.Serein.enabled ? `§eSerein 状态: §a${apiStatus}\n` : ''}
+§b当前备份信息：
+§6  世界大小: §a${formatSize(stats.directories[0].size)} 
+§6  世界文件数量: §a${stats.directories[0].file_count}
+§6  备份大小: §a${formatSize(stats.directories[1].size)}
+§6  备份文件数量: §a${stats.directories[1].file_count}
+§6  永久备份大小: §a${formatSize(stats.directories[2].size)}
+§6  永久备份文件数量: §a${stats.directories[2].file_count}`;
 
         if (isFromGUI) {
             // 如果是从GUI调用，显示图形界面
@@ -1042,6 +1099,7 @@ function showBackupStats(player, output, isFromGUI = false) {
         }
     });
 }
+
 
 
 function backupGUI(player, output) {
@@ -1115,7 +1173,7 @@ function registerCommands() {
 
     let backupFilesEnum = new DynamicEnum(cmd, "BackupFiles");
 	let PbackupFilesEnum = new DynamicEnum(cmd, "PBackupFiles");
-	// 异步加载备份文件名
+
 	getAllBackupFilenames()
 		.then(files => {
 			backupFilesEnum.addValues(files); // 将文件名添加到 DynamicEnum 实例中

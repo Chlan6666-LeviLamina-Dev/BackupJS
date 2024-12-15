@@ -2,7 +2,7 @@ use std::{fs, io};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use rayon::prelude::*;
-use crate::error;
+use tracing::{error};
 
 // 复制 db 文件并确保文件长度符合指定要求
 pub fn copy_and_truncate(source_path: &Path, destination_path: &Path, length: u64) -> io::Result<()> {

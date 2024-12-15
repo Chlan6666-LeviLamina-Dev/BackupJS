@@ -1,75 +1,49 @@
-use chrono::{DateTime, Local, Utc};
-use std::fs::{create_dir_all, OpenOptions};
-use std::io::Write;
+use std::fmt;
+use std::fs::create_dir_all;
+use chrono::{Local};
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
+use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::util::SubscriberInitExt;
 
-pub enum LogLevel {
-    Info,
-    Warning,
-    Error,
-    Debug,
+struct CustomTime;
+
+impl FormatTime for CustomTime {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> fmt::Result {
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        write!(w, "{}", timestamp)
+    }
 }
 
-pub fn log(level: LogLevel, message: &str) {
-    let now: DateTime<Utc> = Utc::now();
-    let local_now = now.with_timezone(&Local);
-
-    let timestamp = local_now.format("%Y-%m-%d %H:%M:%S");
-
-    let (log_level_str, log_level_str_no_color) = match level {
-        LogLevel::Info => ("\x1b[32mINFO\x1b[0m", "INFO"),
-        LogLevel::Warning => ("\x1b[33mWARNING\x1b[0m", "WARNING"),
-        LogLevel::Error => ("\x1b[31mERROR\x1b[0m", "ERROR"),
-        LogLevel::Debug => ("\x1b[34mDEBUG\x1b[0m", "DEBUG"),
-    };
-
-    // 根据日志级别选择输出到标准输出或标准错误
-    match level {
-        LogLevel::Error => eprintln!("[{}] {} {}", timestamp, log_level_str, message),
-        _ => println!("[{}] {} {}", timestamp, log_level_str, message),
-    }
-
-    // 创建 logs 目录
+pub fn init_logger() {
     let logs_dir = "logs/BackupJS";
     create_dir_all(logs_dir).expect("Unable to create logs directory");
+    // 控制台层
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_timer(CustomTime) // 使用启动时间计时器
+        .with_ansi(true)         // 控制台输出时使用 ANSI 转义字符
+        .with_target(true);      // 显示目标模块
 
-    // 生成按年-月-日格式的日志文件名
-    let log_file_name = format!("{}/{}.log", logs_dir, local_now.format("%Y-%m-%d"));
+    // 文件层 - 按日期记录日志
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_timer(CustomTime)
+        .with_ansi(false) // 文件无 ANSI 转义
+        .with_target(true) // 显示目标模块
+        .with_writer(std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("{}/{}.log", logs_dir, Local::now().format("%Y-%m-%d")))
+            .unwrap()); // 明确指定文件输出
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file_name)
-        .expect("Unable to open log file");
 
-    // 文件写入不带颜色的日志
-    writeln!(&mut file, "[{}] [{}] {}", timestamp, log_level_str_no_color, message)
-        .expect("Unable to write to log file");
-}
 
-#[macro_export]
-macro_rules! info {
-    ($($arg:tt)*) => {
-        $crate::utils::logger::log($crate::utils::logger::LogLevel::Info, &format!($($arg)*));
-    };
-}
+    // 初始化日志订阅器
+    tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")), // 根据配置设置日志级别
+        )
+        .with(console_layer)        // 控制台日志层
+        .with(file_layer)           // 按日期日志文件层
+        .init();                    // 初始化日志系统
 
-#[macro_export]
-macro_rules! warning {
-    ($($arg:tt)*) => {
-        $crate::utils::logger::log($crate::utils::logger::LogLevel::Warning, &format!($($arg)*));
-    };
-}
-
-#[macro_export]
-macro_rules! error {
-    ($($arg:tt)*) => {
-        $crate::utils::logger::log($crate::utils::logger::LogLevel::Error, &format!($($arg)*));
-    };
-}
-
-#[macro_export]
-macro_rules! debug {
-    ($($arg:tt)*) => {
-        $crate::utils::logger::log($crate::utils::logger::LogLevel::Debug, &format!($($arg)*));
-    };
 }
