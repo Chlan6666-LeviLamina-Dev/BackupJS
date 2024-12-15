@@ -7,3 +7,4 @@ Recovery_Backup_Core.pdb
 /Recovery_Backup_Core/.gitignore
 7az.exe
 /Recovery_Backup_Core/logs
+package-lock.json
