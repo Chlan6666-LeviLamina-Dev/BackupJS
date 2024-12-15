@@ -1020,7 +1020,7 @@ function getBackupStats(callback) {
     if (config.Serein.enabled) {                     
         url = `${config.Serein.host}/serein/health`;
         auth = config.Serein.auth;
-		if (!url || !auth || !id) {
+		if (!url || !auth) {
 			sendMessage(player, "配置错误：url 或 auth 或 id 参数不能为空！", 'error');
 			return;
 		}
